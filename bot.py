@@ -1,19 +1,15 @@
 """
-EXODUS SMS BOMBER — bot.py
+EXODUS SMS BOMBER — bot.py  v3.0
 Telegram Bot (long-poll)
 Developer: @exodus_own3r
 
-UI: cloned from archive reference — card(), tree(), small_caps(), unicode fonts
-Features:
-  - /start → country selector (BD | India | PAK) + admin panel
-  - /color → cycle button theme (blue / red / green)
-  - Force-join channel gate
-  - Credits + referral system
-  - SQLite + Firebase dual storage
-  - Admin panel: users, ban/unban, import DB, refer subs, channels, broadcast
+New in v3:
+  - Welcome media: admin sets photo/video + caption shown on /start to new/returning users
+  - Media broadcast: broadcast photo/video + text to all users
+  - All original features preserved
 """
 
-import os, re, json, time, html, secrets, threading, sqlite3, copy
+import os, re, json, time, html, secrets, threading, sqlite3, copy, io
 from concurrent.futures import ThreadPoolExecutor
 import requests
 
@@ -80,15 +76,14 @@ SQLITE_PATH      = os.environ.get("SQLITE_PATH", "exodus_bot.db")
 
 PLANS = [(5, 7, "7 Days"), (10, 15, "15 Days"), (20, 30, "1 Month")]
 
-CREDITS_PER_REFERRAL     = int(os.environ.get("CREDITS_PER_REFERRAL", "10"))
-CREDITS_SMS_BOMB         = int(os.environ.get("CREDITS_SMS_BOMB", "2"))
-CREDITS_CUSTOM_BOMB      = int(os.environ.get("CREDITS_CUSTOM_BOMB", "3"))
-CREDITS_CALL_BOMB        = int(os.environ.get("CREDITS_CALL_BOMB", "5"))
-CREDITS_NUCLEAR_IND      = int(os.environ.get("CREDITS_NUCLEAR_IND", "5"))
-CREDITS_NUCLEAR_BD       = int(os.environ.get("CREDITS_NUCLEAR_BD", "30"))
-CREDITS_MIXED_BD         = int(os.environ.get("CREDITS_MIXED_BD", "7"))
-
-PROXY_MULTIPLIER = int(os.environ.get("PROXY_MULTIPLIER", "10"))
+CREDITS_PER_REFERRAL = int(os.environ.get("CREDITS_PER_REFERRAL", "10"))
+CREDITS_SMS_BOMB     = int(os.environ.get("CREDITS_SMS_BOMB", "2"))
+CREDITS_CUSTOM_BOMB  = int(os.environ.get("CREDITS_CUSTOM_BOMB", "3"))
+CREDITS_CALL_BOMB    = int(os.environ.get("CREDITS_CALL_BOMB", "5"))
+CREDITS_NUCLEAR_IND  = int(os.environ.get("CREDITS_NUCLEAR_IND", "5"))
+CREDITS_NUCLEAR_BD   = int(os.environ.get("CREDITS_NUCLEAR_BD", "30"))
+CREDITS_MIXED_BD     = int(os.environ.get("CREDITS_MIXED_BD", "7"))
+PROXY_MULTIPLIER     = int(os.environ.get("PROXY_MULTIPLIER", "10"))
 
 COLOR_THEMES = {
     "blue":  {"main": "primary", "good": "success", "bad": "danger",  "nav": "primary"},
@@ -108,10 +103,7 @@ E = html.escape
 INTERNAL_TOKEN = secrets.token_hex(24)
 
 # ═══════════════════════════════════════════════════════════════
-#  PERMANENT FORCE-JOIN CHANNELS (env-managed, always enforced)
-#  PERMANENT_CHANNELS      = comma-sep chat IDs / usernames
-#  PERMANENT_CHANNEL_LINKS = comma-sep invite/public links
-#  PERMANENT_CHANNEL_TITLES= comma-sep display titles
+#  PERMANENT CHANNELS
 # ═══════════════════════════════════════════════════════════════
 def _parse_permanent_channels() -> list:
     ids    = [x.strip() for x in os.environ.get("PERMANENT_CHANNELS",       "").split(",") if x.strip()]
@@ -129,16 +121,13 @@ def _parse_permanent_channels() -> list:
 PERM_CHANNELS: list = _parse_permanent_channels()
 
 # ═══════════════════════════════════════════════════════════════
-#  FONT UTILITIES  (ported from archive formatter.py)
+#  FONT / CARD UTILITIES
 # ═══════════════════════════════════════════════════════════════
 _SMALL_CAPS = str.maketrans(dict(zip(
     "abcdefghijklmnopqrstuvwxyz",
     "ᴀʙᴄᴅᴇғɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ"
 )))
 
-# Regex: matches HTML tags, code/pre/a blocks, entities, URLs, /cmds, @handles
-# Even-indexed splits are plain text → get small-capped
-# Odd-indexed splits are HTML constructs → preserved verbatim
 _HTML_PARTS = re.compile(
     r'(<code\b[^>]*>.*?</code>'
     r'|<pre\b[^>]*>.*?</pre>'
@@ -152,75 +141,41 @@ _HTML_PARTS = re.compile(
 )
 
 def small_caps(text: str) -> str:
-    """Convert a-z to small-caps unicode. Emoji and non-latin untouched."""
     return str(text).lower().translate(_SMALL_CAPS)
 
 def style_markup(text: str) -> str:
-    """Apply small_caps to plain-text segments, preserve HTML/URLs/handles."""
     parts = _HTML_PARTS.split(text)
     for i in range(0, len(parts), 2):
         parts[i] = small_caps(parts[i])
     return "".join(parts)
 
-def _font(text, upper, lower, digits=None, exceptions=None):
-    exceptions = exceptions or {}
-    out = []
-    for c in str(text):
-        if c in exceptions:
-            out.append(exceptions[c])
-        elif "A" <= c <= "Z":
-            out.append(chr(upper + ord(c) - 65))
-        elif "a" <= c <= "z":
-            out.append(chr(lower + ord(c) - 97))
-        elif digits is not None and "0" <= c <= "9":
-            out.append(chr(digits + ord(c) - 48))
-        else:
-            out.append(c)
-    return "".join(out)
-
-def bold_font(text) -> str:
-    """Mathematical bold unicode — for emphasis on key values."""
-    return _font(text, 0x1D400, 0x1D41A, 0x1D7CE)
-
 def tree(lines) -> str:
-    """Format a list of items as a ├/└ tree."""
     items = [
         re.sub(r'^\s*•\s*', '', str(line)).replace('\n\n', '\n')
         for line in lines if str(line).strip()
     ]
-    if not items:
-        return ""
+    if not items: return ""
     return '\n'.join(
         ('└ ' if i == len(items) - 1 else '├ ') + line.replace('\n', '\n  ')
         for i, line in enumerate(items)
     )
 
 def card(title: str, lines=(), footer: str = None, *, mood: str = 'luxury') -> str:
-    """
-    Build a styled message card matching the archive bot's format.
-
-    mood: 'luxury' (✦), 'bold' (★), 'calm' (❖)
-    Returns HTML string with style_markup applied.
-    """
     symbol = {'bold': '★', 'luxury': '✦', 'calm': '❖'}.get(mood, '✦')
     title_safe = small_caps(html.escape(str(title), quote=False))
     body = f"<b>{symbol} » {title_safe}</b>"
-
     if lines:
         content = tree(lines)
         sep = '━━━\n' if len(lines) > 8 else ''
         body += f'\n\n{sep}<blockquote>{content}</blockquote>'
-
     action = str(footer or '').strip().lstrip('➥').strip()
     if not action:
         action = small_caps('choose an option below')
     else:
         action = style_markup(re.sub(r'\n+', ' · ', action))
-
     body += f'\n\n➥ {action}'
     return style_markup(body)
 
-# Dev footer — appended after card() output
 FOOTER = f"\n<i>» <a href=\"{DEV_URL}\">{DEV_TAG}</a></i>"
 
 # ═══════════════════════════════════════════════════════════════
@@ -305,7 +260,7 @@ def init_sqlite():
             """)
         conn.close()
 
-# --- SQLite user helpers ---
+# ── user helpers ──────────────────────────────────────────────
 def sq_get_user(uid):
     with _sq_lock:
         conn = _sq()
@@ -577,7 +532,54 @@ def sq_del_refer_sub(sub_id):
         finally: conn.close()
 
 # ═══════════════════════════════════════════════════════════════
-#  FIREBASE HELPERS (with SQLite fallback)
+#  WELCOME MEDIA SETTINGS
+#  Stored in SQLite settings table as JSON blob under key "welcome_media"
+#  Schema: { "type": "photo"|"video"|"text", "file_id": "...", "caption": "..." }
+# ═══════════════════════════════════════════════════════════════
+def get_welcome_media() -> dict:
+    """Return welcome media config or {} if not set."""
+    raw = sq_get_setting("welcome_media")
+    if not raw: return {}
+    try: return json.loads(raw)
+    except: return {}
+
+def set_welcome_media(media_type: str, file_id: str, caption: str):
+    data = {"type": media_type, "file_id": file_id, "caption": caption}
+    sq_set_setting("welcome_media", json.dumps(data))
+    if _db:
+        try: _db.collection("settings").document("welcome_media").set({"v": json.dumps(data)})
+        except: pass
+
+def clear_welcome_media():
+    sq_set_setting("welcome_media", "")
+    if _db:
+        try: _db.collection("settings").document("welcome_media").set({"v": ""})
+        except: pass
+
+def send_welcome_media(cid, markup=None):
+    """Send welcome media (photo/video) + caption to a chat. Returns True if sent."""
+    wm = get_welcome_media()
+    if not wm or not wm.get("type") or wm["type"] == "text":
+        return False
+    cap = wm.get("caption", "")
+    fid = wm.get("file_id", "")
+    if not fid: return False
+    try:
+        p = dict(chat_id=cid, caption=cap, parse_mode="HTML")
+        if markup: p["reply_markup"] = markup
+        if wm["type"] == "photo":
+            p["photo"] = fid
+            tg("sendPhoto", **p)
+        elif wm["type"] == "video":
+            p["video"] = fid
+            tg("sendVideo", **p)
+        return True
+    except TGError as e:
+        print(f"[Bot] send_welcome_media error: {e.desc}")
+        return False
+
+# ═══════════════════════════════════════════════════════════════
+#  FIREBASE HELPERS
 # ═══════════════════════════════════════════════════════════════
 def fb_user(uid):
     if not _db: return sq_get_user(uid)
@@ -604,14 +606,12 @@ def fb_user_update(uid, **kwargs):
     except: return False
 
 def fb_key_get(uid):
-    if not _db:
-        return sq_get_key_by_user(uid)
+    if not _db: return sq_get_key_by_user(uid)
     try:
         docs = _db.collection("keys").where("user_id", "==", str(uid)) \
             .where("revoked", "==", False) \
             .order_by("expires_at", direction=firestore.Query.DESCENDING).limit(1).stream()
-        for d in docs:
-            return d.to_dict()
+        for d in docs: return d.to_dict()
         return sq_get_key_by_user(uid)
     except: return sq_get_key_by_user(uid)
 
@@ -739,33 +739,23 @@ def fb_users_all():
 # ═══════════════════════════════════════════════════════════════
 #  DB WRAPPER
 # ═══════════════════════════════════════════════════════════════
-def get_setting(k, default=None):
-    return fb_setting_get(k, default)
-
-def set_setting(k, v):
-    fb_setting_set(k, v)
-
+def get_setting(k, default=None): return fb_setting_get(k, default)
+def set_setting(k, v): fb_setting_set(k, v)
 def daily_limit():
     try: return int(get_setting("daily_limit", DEFAULT_DAILY))
     except: return DEFAULT_DAILY
-
-def force_join_on():
-    return get_setting("force_join", "1") == "1"
-
+def force_join_on(): return get_setting("force_join", "1") == "1"
 def get_button_color():
     global _global_color
     c = get_setting("button_color", "blue")
-    if c in COLOR_THEMES:
-        _global_color = c
+    if c in COLOR_THEMES: _global_color = c
     return _global_color
-
 def set_button_color(color):
     global _global_color
     _global_color = color
     set_setting("button_color", color)
 
-def get_user(uid):
-    return fb_user(uid)
+def get_user(uid): return fb_user(uid)
 
 def upsert_user(frm, referred_by=None):
     uid = frm["id"]
@@ -779,8 +769,7 @@ def upsert_user(frm, referred_by=None):
             "first_name": frm.get("first_name") or "",
             "joined_at": int(time.time()), "referred_by": rb,
             "ref_counted": False, "ref_points": 0, "total_refs": 0,
-            "credits": 0, "banned": False, "total_bombs": 0,
-            "is_premium": False
+            "credits": 0, "banned": False, "total_bombs": 0, "is_premium": False
         }
         fb_user_set(uid, data)
         return fb_user(uid), True
@@ -799,10 +788,8 @@ def add_credits(uid, amount):
 def active_key(uid):
     k = fb_key_get(uid)
     if k and k.get("expires_at", 0) > int(time.time()):
-        if isinstance(k.get("revoked"), int):
-            k["revoked"] = bool(k["revoked"])
-        if not k.get("revoked"):
-            return k
+        if isinstance(k.get("revoked"), int): k["revoked"] = bool(k["revoked"])
+        if not k.get("revoked"): return k
     return None
 
 def grant_key(uid, days, label=""):
@@ -820,31 +807,25 @@ def grant_key(uid, days, label=""):
 
 def claim_plan(uid, idx, plans_list=None):
     plan_list = plans_list or get_refer_subs()
-    if idx < 0 or idx >= len(plan_list):
-        return None
+    if idx < 0 or idx >= len(plan_list): return None
     plan = plan_list[idx]
-    cost = plan["ref_cost"]
-    days = plan["days"]
-    label = plan["label"]
+    cost = plan["ref_cost"]; days = plan["days"]; label = plan["label"]
     u = fb_user(uid)
-    if not u or u.get("ref_points", 0) < cost:
-        return None
+    if not u or u.get("ref_points", 0) < cost: return None
     fb_user_update(uid, ref_points=u["ref_points"] - cost)
     sq_incr_user(uid, "ref_points", -cost)
     return grant_key(uid, days, label)
 
 def get_refer_subs():
     db_subs = sq_all_refer_subs()
-    if db_subs:
-        return db_subs
+    if db_subs: return db_subs
     return [{"id": i, "ref_cost": c, "days": d, "label": l}
             for i, (c, d, l) in enumerate(PLANS)]
 
 def list_channels():
-    """Permanent channels (env) always first, then any extra DB channels."""
     db_chans = fb_channels()
     perm_ids = {c["chat_id"] for c in PERM_CHANNELS}
-    extra    = [c for c in db_chans if c.get("chat_id") not in perm_ids]
+    extra = [c for c in db_chans if c.get("chat_id") not in perm_ids]
     return PERM_CHANNELS + extra
 
 # ═══════════════════════════════════════════════════════════════
@@ -870,6 +851,21 @@ def tg(method, _t=30, **params):
                       (data.get("parameters") or {}).get("retry_after", 0))
     return data["result"]
 
+def tg_multipart(method, files, **params):
+    """POST with multipart/form-data for file uploads."""
+    s = getattr(_tl, "s", None)
+    if s is None: s = _tl.s = requests.Session()
+    try:
+        r = s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
+                   data={k: v for k, v in params.items() if v is not None},
+                   files=files, timeout=60)
+        data = r.json()
+    except Exception as e:
+        raise TGError(f"network: {e}")
+    if not data.get("ok"):
+        raise TGError(data.get("description", "error"), data.get("error_code", 0))
+    return data["result"]
+
 def _strip_style(markup):
     m = copy.deepcopy(markup)
     for row in m.get("inline_keyboard", []):
@@ -877,16 +873,14 @@ def _strip_style(markup):
     return m
 
 def _call_markup(method, **params):
-    try:
-        return tg(method, **params)
+    try: return tg(method, **params)
     except TGError as e:
         if "message is not modified" in e.desc: return None
         if e.code == 400 and params.get("reply_markup"):
             low = e.desc.lower()
             if "style" in low or "button" in low or "unsupported" in low:
                 params["reply_markup"] = _strip_style(params["reply_markup"])
-                try:
-                    return tg(method, **params)
+                try: return tg(method, **params)
                 except TGError as e2:
                     if "message is not modified" in e2.desc: return None
                     raise
@@ -910,7 +904,6 @@ def show(cid, mid, text, markup=None):
     return send(cid, text, markup)
 
 def B(text, cb=None, url=None, style=None, copy_text=None):
-    """Build an inline button. Button label auto-converted to small-caps."""
     b = {"text": small_caps(str(text))}
     if url: b["url"] = url
     elif copy_text: b["copy_text"] = {"text": copy_text}
@@ -922,7 +915,6 @@ def KB(*rows):
     return {"inline_keyboard": [list(r) for r in rows if r]}
 
 def C():
-    """Return current color theme dict."""
     return COLOR_THEMES.get(get_button_color(), COLOR_THEMES["blue"])
 
 # ═══════════════════════════════════════════════════════════════
@@ -936,8 +928,7 @@ def _is_member(uid, chat_id):
     if time.time() - _member_cache.get(ck, 0) < _CACHE_TTL: return True
     try:
         m = tg("getChatMember", chat_id=chat_id, user_id=uid)
-    except TGError:
-        return True
+    except TGError: return True
     st = m.get("status")
     ok = st in ("creator", "administrator", "member") or (st == "restricted" and m.get("is_member", False))
     if ok: _member_cache[ck] = time.time()
@@ -945,21 +936,14 @@ def _is_member(uid, chat_id):
 
 def missing_channels(uid):
     if uid in ADMIN_IDS: return []
-
     miss = []
-
-    # Permanent channels — ALWAYS enforced, ignore force_join toggle
     for c in PERM_CHANNELS:
-        if not _is_member(uid, c["chat_id"]):
-            miss.append(c)
-
-    # DB channels — only if force_join toggle is on
+        if not _is_member(uid, c["chat_id"]): miss.append(c)
     if force_join_on():
         perm_ids = {c["chat_id"] for c in PERM_CHANNELS}
         for c in fb_channels():
             if c.get("chat_id") not in perm_ids and not _is_member(uid, c["chat_id"]):
                 miss.append(c)
-
     return miss
 
 _pending_action = {}
@@ -1035,21 +1019,18 @@ def _next_color(current):
     idx = COLOR_ORDER.index(current) if current in COLOR_ORDER else 0
     return COLOR_ORDER[(idx + 1) % len(COLOR_ORDER)]
 
-# ─── /start screen ──────────────────────────────────────────────
 def screen_start(uid, name):
     ct = C()
     row = fb_user(uid)
     credits = row.get("credits", 0) if row else 0
     is_premium = row and row.get("is_premium", False)
     prem = " 💎" if is_premium else ""
-
     text = card(f"exodus sms bomber{prem}", [
         f"hey <b>{E(name or 'there')}</b> 👋",
         f"credits · <code>{credits}</code>",
         f"referral bonus · <code>{CREDITS_PER_REFERRAL}</code> credits per friend",
         "🌍 select target country",
     ], "choose your target below") + FOOTER
-
     rows = [
         [B("🇧🇩 Bangladesh", cb="country:bd",  style=ct["main"]),
          B("🇮🇳 India",      cb="country:ind", style=ct["main"]),
@@ -1065,7 +1046,6 @@ def screen_start(uid, name):
         rows.append([B("🛡️ Admin Panel", cb="adm:home", style=ct["bad"])])
     return text, KB(*rows)
 
-# ─── India mode selector ────────────────────────────────────────
 def screen_india(uid):
     ct = C()
     row = fb_user(uid)
@@ -1073,14 +1053,12 @@ def screen_india(uid):
     credits = row.get("credits", 0) if row else 0
     nuclear_txt = f"☢️ Nuclear ({CREDITS_NUCLEAR_IND}c)" if is_premium else "🔒 Nuclear — Premium Only"
     nuclear_cb  = "bomb:ind:nuclear" if is_premium else "premium_only"
-
     text = card("🇮🇳 india — attack mode", [
         f"credits · <code>{credits}</code>",
         f"📲 sms bomb — <code>{CREDITS_SMS_BOMB}</code> credits\n60+ otp apis fired simultaneously",
         f"⚡ custom sms — <code>{CREDITS_CUSTOM_BOMB}</code> credits\ncarrybee merchant api (deep penetration)",
         f"☢️ nuclear — <code>{CREDITS_NUCLEAR_IND}</code> credits\nsms + custom + firebase (maximum destruction)",
     ], "choose attack mode") + FOOTER
-
     return text, KB(
         [B(f"📲 SMS ({CREDITS_SMS_BOMB}c)",      cb="bomb:ind:sms",    style=ct["main"]),
          B(f"⚡ Custom ({CREDITS_CUSTOM_BOMB}c)", cb="bomb:ind:custom", style=ct["good"])],
@@ -1088,7 +1066,6 @@ def screen_india(uid):
         [B("🔙 Back",                             cb="back:start",      style=ct["nav"])],
     )
 
-# ─── Bangladesh mode selector ────────────────────────────────────
 def screen_bd(uid):
     ct = C()
     row = fb_user(uid)
@@ -1096,22 +1073,18 @@ def screen_bd(uid):
     credits = row.get("credits", 0) if row else 0
     nuclear_txt = f"☢️ Nuclear ({CREDITS_NUCLEAR_BD}c)" if is_premium else "🔒 Nuclear — Premium Only"
     nuclear_cb  = "bomb:bd:nuclear" if is_premium else "premium_only"
-
-    # credits = limit value sent to BD API → total hits = credits × PROXY_MULTIPLIER
-    sms_hits     = CREDITS_SMS_BOMB     * PROXY_MULTIPLIER
-    call_hits    = CREDITS_CALL_BOMB    * PROXY_MULTIPLIER
-    mixed_hits   = CREDITS_MIXED_BD     * PROXY_MULTIPLIER
-    nuclear_hits = CREDITS_NUCLEAR_BD   * PROXY_MULTIPLIER
-
+    sms_hits     = CREDITS_SMS_BOMB   * PROXY_MULTIPLIER
+    call_hits    = CREDITS_CALL_BOMB  * PROXY_MULTIPLIER
+    mixed_hits   = CREDITS_MIXED_BD   * PROXY_MULTIPLIER
+    nuclear_hits = CREDITS_NUCLEAR_BD * PROXY_MULTIPLIER
     text = card("🇧🇩 bangladesh — attack mode", [
         f"credits · <code>{credits}</code>",
         f"⚡ multiplier · <code>{PROXY_MULTIPLIER}×</code> proxies per call",
-        f"📲 sms — <code>{CREDITS_SMS_BOMB}</code>c → <code>{CREDITS_SMS_BOMB}</code> limit × <code>{PROXY_MULTIPLIER}</code> = <code>{sms_hits}</code> total hits",
-        f"📞 call — <code>{CREDITS_CALL_BOMB}</code>c → <code>{CREDITS_CALL_BOMB}</code> limit × <code>{PROXY_MULTIPLIER}</code> = <code>{call_hits}</code> total hits",
+        f"📲 sms — <code>{CREDITS_SMS_BOMB}</code>c → <code>{sms_hits}</code> total hits",
+        f"📞 call — <code>{CREDITS_CALL_BOMB}</code>c → <code>{call_hits}</code> total hits",
         f"🔀 mixed — <code>{CREDITS_MIXED_BD}</code>c → sms + call each <code>{mixed_hits}</code> hits",
         f"☢️ nuclear — <code>{CREDITS_NUCLEAR_BD}</code>c → both type <code>{nuclear_hits}</code>+ hits",
     ], "choose attack mode") + FOOTER
-
     return text, KB(
         [B(f"📲 SMS ({CREDITS_SMS_BOMB}c)",     cb="bomb:bd:sms",   style=ct["main"]),
          B(f"📞 Call ({CREDITS_CALL_BOMB}c)",    cb="bomb:bd:call",  style=ct["good"])],
@@ -1120,29 +1093,24 @@ def screen_bd(uid):
         [B("🔙 Back",                            cb="back:start",    style=ct["nav"])],
     )
 
-# ─── Pakistan mode selector ──────────────────────────────────────
 def screen_pak(uid):
     ct = C()
     row = fb_user(uid)
     credits = row.get("credits", 0) if row else 0
-
     text = card("🇵🇰 pakistan — sms only", [
         f"credits · <code>{credits}</code>",
-        f"📲 sms bomb — <code>{CREDITS_SMS_BOMB}</code> credits\n3 pak sms apis fired simultaneously",
+        f"📲 sms bomb — <code>{CREDITS_SMS_BOMB}</code> credits",
     ], "ready to fire") + FOOTER
-
     return text, KB(
         [B(f"📲 SMS ({CREDITS_SMS_BOMB}c)", cb="bomb:pak:sms", style=ct["main"])],
         [B("🔙 Back",                       cb="back:start",   style=ct["nav"])],
     )
 
-# ─── Credits screen ──────────────────────────────────────────────
 def screen_credits(uid):
     ct = C()
     row = fb_user(uid)
     credits = row.get("credits", 0) if row else 0
     is_premium = row and row.get("is_premium", False)
-
     text = card("💳 my credits", [
         f"balance · <code>{credits}</code> credits",
         f"premium · {'✅ active' if is_premium else '❌ no'}",
@@ -1150,9 +1118,7 @@ def screen_credits(uid):
         f"🇧🇩 sms {CREDITS_SMS_BOMB}c  |  call {CREDITS_CALL_BOMB}c  |  mixed {CREDITS_MIXED_BD}c  |  nuclear {CREDITS_NUCLEAR_BD}c",
         f"🇵🇰 sms {CREDITS_SMS_BOMB}c",
         f"refer friends · +{CREDITS_PER_REFERRAL} per referral",
-        "redeem gift code · or buy from developer",
     ], "earn or spend your credits") + FOOTER
-
     return text, KB(
         [B("🎁 Refer & Earn", cb="refer",      style=ct["good"]),
          B("🎟️ Redeem Gift",  cb="gift",       style=ct["main"])],
@@ -1160,19 +1126,16 @@ def screen_credits(uid):
         [B("🔙 Back",         cb="back:start", style=ct["nav"])],
     )
 
-# ─── Refer screen ────────────────────────────────────────────────
 def screen_refer(uid):
     ct = C()
     u = fb_user(uid)
     link = f"https://t.me/{BOT_USERNAME}?start=ref_{uid}"
     pts = u.get("ref_points", 0) if u else 0
     plans = get_refer_subs()
-
     tiers = []
     for p in plans:
         mark = "✅" if pts >= p["ref_cost"] else "🔒"
         tiers.append(f"{mark} {p['ref_cost']} refs → {p.get('label') or str(p['days'])+' days'}")
-
     text = card("🎁 refer & earn", [
         f"invite friends · get <code>{CREDITS_PER_REFERRAL}</code> credits per referral",
         f"your link · <code>{E(link)}</code>",
@@ -1180,9 +1143,7 @@ def screen_refer(uid):
         f"points · <code>{pts}</code>",
         "🏆 key rewards",
         *tiers,
-        "claiming spends points · days stack on existing key",
     ], "share your link to earn") + FOOTER
-
     rows = []
     for i, p in enumerate(plans):
         if pts >= p["ref_cost"]:
@@ -1192,12 +1153,11 @@ def screen_refer(uid):
             )])
     share = ("https://t.me/share/url?url=" + requests.utils.quote(link, safe="") +
              "&text=" + requests.utils.quote("💣 Bomb SMS free with Exodus Bomber!", safe=""))
-    rows.append([B("📤 Share", url=share,       style=ct["main"]),
-                 B("📋 Copy",  copy_text=link,  style=ct["main"])])
-    rows.append([B("🔙 Back",  cb="back:start", style=ct["nav"])])
+    rows.append([B("📤 Share", url=share, style=ct["main"]),
+                 B("📋 Copy",  copy_text=link, style=ct["main"])])
+    rows.append([B("🔙 Back", cb="back:start", style=ct["nav"])])
     return text, KB(*rows)
 
-# ─── API guide ───────────────────────────────────────────────────
 def api_guide(key=None):
     k = key or "YOUR_KEY"
     return card("📖 api guide", [
@@ -1206,29 +1166,20 @@ def api_guide(key=None):
         f"🇧🇩 bd · <code>{E(BASE_URL)}/bd?key={k}&number=880XXXXXXXX&mode=sms</code>",
         f"🇵🇰 pak · <code>{E(BASE_URL)}/pak?key={k}&number=92XXXXXXXXXX</code>",
         "modes · sms  ·  custom (india)  ·  call / mixed / nuclear (bd)",
-        "errors · 401 = invalid key  ·  429 = daily limit reached",
     ], "copy your key and start bombing") + FOOTER
 
-# ─── API key screen ──────────────────────────────────────────────
 def screen_key(uid):
     ct = C()
     row = active_key(uid)
     if not row:
         plans = get_refer_subs()
-        tier_lines = [
-            f"{p['ref_cost']} refs → {p.get('label') or str(p['days'])+' days'}"
-            for p in plans
-        ]
-        text = card("🔑 my api key", [
-            "no active api key",
-            *tier_lines,
-        ], "earn refs or buy to get a key") + FOOTER
+        tier_lines = [f"{p['ref_cost']} refs → {p.get('label') or str(p['days'])+' days'}" for p in plans]
+        text = card("🔑 my api key", ["no active api key", *tier_lines], "earn refs or buy to get a key") + FOOTER
         return text, KB(
             [B("🎁 Refer & Earn", cb="refer",      style=ct["good"])],
             [B("💎 Buy Key",      url=CONTACT_URL, style=ct["bad"])],
             [B("🔙 Back",         cb="back:start", style=ct["nav"])],
         )
-
     lim = row.get("daily_limit") or daily_limit()
     text = card("🔑 my api key", [
         f"key · <code>{row['key']}</code>",
@@ -1237,9 +1188,7 @@ def screen_key(uid):
         f"🇮🇳 <code>{E(BASE_URL)}/ind?key={row['key']}&number=91XX&mode=sms</code>",
         f"🇧🇩 <code>{E(BASE_URL)}/bd?key={row['key']}&number=880XX&mode=sms</code>",
         f"🇵🇰 <code>{E(BASE_URL)}/pak?key={row['key']}&number=92XX</code>",
-        "modes · sms  ·  custom  ·  call / mixed / nuclear",
     ], "copy key and start bombing") + FOOTER
-
     return text, KB(
         [B("📋 Copy Key", copy_text=row["key"], style=ct["good"]),
          B("📖 Guide",    cb="docs",            style=ct["main"])],
@@ -1267,9 +1216,9 @@ def screen_docs(uid):
     ct = C()
     row = active_key(uid)
     return api_guide(row["key"] if row else None), KB(
-        [B("🔑 My Key",   cb="mykey",    style=ct["main"]),
-         B("🎁 Get Key",  cb="refer",    style=ct["good"])],
-        [B("🔙 Back",     cb="back:start", style=ct["nav"])],
+        [B("🔑 My Key",  cb="mykey",      style=ct["main"]),
+         B("🎁 Get Key", cb="refer",      style=ct["good"])],
+        [B("🔙 Back",    cb="back:start", style=ct["nav"])],
     )
 
 def screen_buy():
@@ -1281,8 +1230,8 @@ def screen_buy():
         f"contact @{E(CONTACT_USERNAME)} to purchase",
     ], "get in touch below") + FOOTER
     return text, KB(
-        [B("💬 Contact to Buy", url=CONTACT_URL,  style=ct["good"])],
-        [B("🔙 Back",           cb="back:start",  style=ct["nav"])],
+        [B("💬 Contact to Buy", url=CONTACT_URL, style=ct["good"])],
+        [B("🔙 Back",           cb="back:start", style=ct["nav"])],
     )
 
 def screen_gift():
@@ -1298,31 +1247,26 @@ def handle_gift_code(uid, cid, code):
     code = code.strip().upper()
     gc = fb_gift_get(code)
     back = KB([B("🔙 Back", cb="back:start", style=ct["nav"])])
-
     if not gc:
         return send(cid, card("❌ invalid code", ["gift code not found"], "try again or contact dev", mood="calm") + FOOTER, back)
     if gc.get("expires_at") and gc["expires_at"] < int(time.time()):
-        return send(cid, card("❌ expired", ["this gift code has expired"], "try another", mood="calm") + FOOTER, back)
+        return send(cid, card("❌ expired", ["this gift code has expired"], "", mood="calm") + FOOTER, back)
     max_u = gc.get("max_users", 0)
     if max_u and gc.get("claimed_count", 0) >= max_u:
-        return send(cid, card("❌ fully claimed", ["gift code fully redeemed"], "get a new one from dev", mood="calm") + FOOTER, back)
+        return send(cid, card("❌ fully claimed", ["gift code fully redeemed"], "", mood="calm") + FOOTER, back)
     if fb_gift_claim_exists(code, uid):
-        return send(cid, card("❌ already claimed", ["you already used this gift code"], "one claim per user", mood="calm") + FOOTER, back)
-
+        return send(cid, card("❌ already claimed", ["you already used this gift code"], "", mood="calm") + FOOTER, back)
     fb_gift_claim(code, uid)
     new_data = {**gc, "claimed_count": gc.get("claimed_count", 0) + 1}
     fb_gift_set(code, new_data)
-
     extra_lines = []
     if gc.get("is_premium"):
         fb_user_update(uid, is_premium=True)
         sq_update_user(uid, is_premium=1)
         extra_lines.append("💎 premium access unlocked!")
     add_credits(uid, gc["credits"])
-
     send(cid, card("🎉 gift claimed!", [
-        f"+{gc['credits']} credits added",
-        *extra_lines,
+        f"+{gc['credits']} credits added", *extra_lines,
     ], "your credits are ready") + FOOTER,
     KB([B("💳 My Credits", cb="credits",    style=ct["good"]),
         B("🔙 Back",       cb="back:start", style=ct["nav"])]))
@@ -1358,17 +1302,12 @@ def call_bomb_api(country, number, mode="sms"):
 def handle_bomb(uid, cid, country, mode, number):
     ct = C()
     pending = {"action": "bomb", "country": country, "mode": mode, "number": number}
-    if not gate(uid, cid, pending=pending):
-        return
-
+    if not gate(uid, cid, pending=pending): return
     with _inflight_lock:
         if uid in _inflight:
-            send(cid, card("⏳ wait", [
-                "your previous bomb is still running",
-            ], "please wait for it to finish", mood="calm") + FOOTER)
+            send(cid, card("⏳ wait", ["your previous bomb is still running"], "please wait", mood="calm") + FOOTER)
             return
         _inflight.add(uid)
-
     try:
         flags = {"ind": "🇮🇳", "bd": "🇧🇩", "pak": "🇵🇰"}
         wait = send(cid, card(f"💣 bombing {flags.get(country,'')} {country.upper()}…", [
@@ -1377,28 +1316,19 @@ def handle_bomb(uid, cid, country, mode, number):
             "firing all apis now…",
         ], "stand by", mood="bold") + FOOTER)
         mid = wait["message_id"] if wait else None
-
         data, err = call_bomb_api(country, number, mode)
         buy_row = [B("💎 Buy Credits", url=CONTACT_URL, style=ct["bad"]),
                    B("👨‍💻 Dev",        url=DEV_URL,     style=ct["nav"])]
-
         ok = bool(data) and data.get("status") is True
         if not ok:
             reason = err or (data or {}).get("message") or "all apis failed"
-            show(cid, mid, card("❌ bomb failed", [
-                E(str(reason)),
-            ], "try again or contact dev", mood="calm") + FOOTER, KB(buy_row))
+            show(cid, mid, card("❌ bomb failed", [E(str(reason))], "try again or contact dev", mood="calm") + FOOTER,
+                 KB(buy_row))
             return
-
         sent  = data.get("total_sent") or data.get("sent", 0)
         total = data.get("total_apis", 0)
         rate  = (sent / total * 100) if total else 0
-
-        if mode == "nuclear":
-            count_line = "☢️ maximum payload delivered"
-        else:
-            count_line = f"apis · <code>{sent}/{total}</code> ({rate:.1f}%)"
-
+        count_line = "☢️ maximum payload delivered" if mode == "nuclear" else f"apis · <code>{sent}/{total}</code> ({rate:.1f}%)"
         show(cid, mid, card("✅ bomb complete!", [
             f"{flags.get(country,'')} country · {country.upper()}",
             f"target · <code>{E(number)}</code>",
@@ -1407,7 +1337,6 @@ def handle_bomb(uid, cid, country, mode, number):
             "💥 target destroyed!",
         ], "fire another round?", mood="bold") + FOOTER,
         KB([B("💣 Bomb Again", cb=f"country:{country}", style=ct["good"])], buy_row))
-
         cost = BOMB_COSTS.get((country, mode), CREDITS_SMS_BOMB)
         sq_incr_user(uid, "credits", -cost)
         sq_incr_user(uid, "total_bombs", 1)
@@ -1418,37 +1347,31 @@ def handle_bomb(uid, cid, country, mode, number):
                      "total_bombs": firestore.Increment(1)}, merge=True)
             except: pass
     finally:
-        with _inflight_lock:
-            _inflight.discard(uid)
+        with _inflight_lock: _inflight.discard(uid)
 
 def start_bomb_flow(uid, cid, mid, country, mode):
     ct = C()
     row = fb_user(uid)
     if not row: return
     is_premium = row.get("is_premium", False)
-
     if mode == "nuclear" and not is_premium:
         return show(cid, mid, card("🔒 premium only", [
             "nuclear bomb requires premium",
             f"contact @{E(CONTACT_USERNAME)} to upgrade",
         ], "get premium below", mood="calm") + FOOTER,
-        KB([B("💎 Get Premium", url=CONTACT_URL,  style=ct["bad"])],
-           [B("🔙 Back",        cb="back:start",  style=ct["nav"])]))
-
+        KB([B("💎 Get Premium", url=CONTACT_URL, style=ct["bad"])],
+           [B("🔙 Back",        cb="back:start", style=ct["nav"])]))
     cost = BOMB_COSTS.get((country, mode), CREDITS_SMS_BOMB)
     if row.get("credits", 0) < cost:
         return show(cid, mid, card("❌ insufficient credits", [
             f"need · <code>{cost}</code> credits",
             f"balance · <code>{row.get('credits', 0)}</code> credits",
-            "refer friends or buy credits to continue",
         ], "top up below", mood="calm") + FOOTER,
         KB([B("🎁 Refer & Earn", cb="refer",      style=ct["good"])],
            [B("💎 Buy Credits",  url=CONTACT_URL, style=ct["bad"])],
            [B("🔙 Back",         cb="back:start", style=ct["nav"])]))
-
     flags = {"ind": "🇮🇳", "bd": "🇧🇩", "pak": "🇵🇰"}
     country_name = {"ind": "india", "bd": "bangladesh", "pak": "pakistan"}.get(country, country)
-
     _pending_action[uid] = {"action": "bomb", "country": country, "mode": mode}
     show(cid, mid, card(f"{flags.get(country,'')} {country_name} — {mode}", [
         f"cost · <code>{cost}</code> credits",
@@ -1487,28 +1410,31 @@ def _stats():
 def adm_home():
     ct = C()
     s = _stats()
+    wm = get_welcome_media()
+    wm_status = f"{'📷' if wm.get('type')=='photo' else '🎬' if wm.get('type')=='video' else '❌'} {wm.get('type','none')}"
     text = card("🛡️ admin control panel", [
         f"👥 users · <code>{s.get('users',0)}</code>  🆕 24h · <code>{s.get('new24',0)}</code>",
         f"🔑 keys · <code>{s.get('keys',0)}</code>  📢 channels · <code>{s.get('chans',0)}</code>",
         f"💣 bombs · <code>{s.get('bombs',0)}</code>  🚫 banned · <code>{s.get('banned',0)}</code>",
         f"💰 credits · <code>{s.get('credits',0)}</code>  💎 premium · <code>{s.get('premium',0)}</code>",
         f"force-join · {'on ✅' if force_join_on() else 'off ❌'}",
+        f"welcome media · {wm_status}",
         f"color · {COLOR_NAMES.get(get_button_color(), 'blue')}",
     ], "manage your bot below", mood="bold") + FOOTER
     return text, KB(
-        [B("📊 Statistics",    cb="adm:stats",  style=ct["main"]),
-         B("👥 Users",         cb="adm:users",  style=ct["main"])],
-        [B("📢 Channels",      cb="adm:ch",     style=ct["good"]),
-         B("📣 Broadcast",     cb="adm:bc",     style=ct["good"])],
-        [B("🔑 API Keys",      cb="adm:keys",   style=ct["main"]),
-         B("⚙️ Settings",     cb="adm:set",    style=ct["main"])],
-        [B("🎟️ Gift Codes",   cb="adm:gift",   style=ct["good"]),
-         B("🎯 Refer Subs",    cb="adm:rsubs",  style=ct["good"])],
-        [B("💾 Import DB",     cb="adm:import", style=ct["main"]),
-         B("📤 Export DB",     cb="adm:export", style=ct["main"])],
-        [B("💎 Premium Users", cb="adm:prem",   style=ct["bad"])],
-        [B("🌐 Web Panel",     url=BASE_URL + "/admin", style=ct["good"]),
-         B("🔙 Close",         cb="back:start", style=ct["bad"])],
+        [B("📊 Statistics",    cb="adm:stats",   style=ct["main"]),
+         B("👥 Users",         cb="adm:users",   style=ct["main"])],
+        [B("📢 Channels",      cb="adm:ch",      style=ct["good"]),
+         B("📣 Broadcast",     cb="adm:bc",      style=ct["good"])],
+        [B("🔑 API Keys",      cb="adm:keys",    style=ct["main"]),
+         B("⚙️ Settings",      cb="adm:set",     style=ct["main"])],
+        [B("🎟️ Gift Codes",    cb="adm:gift",    style=ct["good"]),
+         B("🎯 Refer Subs",    cb="adm:rsubs",   style=ct["good"])],
+        [B("🖼 Welcome Media", cb="adm:wm",      style=ct["main"]),
+         B("💾 Data",          cb="adm:data",    style=ct["main"])],
+        [B("💎 Premium Users", cb="adm:prem",    style=ct["bad"])],
+        [B("🌐 Web Panel", url=BASE_URL + "/admin", style=ct["good"]),
+         B("🔙 Close",         cb="back:start",  style=ct["bad"])],
     )
 
 def adm_stats():
@@ -1549,9 +1475,7 @@ def adm_channels():
 
 def adm_users():
     ct = C()
-    text = card("👥 user manager", [
-        "find a user by telegram id to manage",
-    ], "search below")
+    text = card("👥 user manager", ["find a user by telegram id to manage"], "search below")
     return text, KB(
         [B("🔍 Find User", cb="adm:ufind", style=ct["good"])],
         [B("🔙 Back",      cb="adm:home",  style=ct["nav"])],
@@ -1575,12 +1499,12 @@ def adm_user_card(uid):
         f"banned · {'yes 🚫' if u.get('banned') else 'no ✅'}",
         f"key · {('<code>' + k['key'][:20] + '…</code> — ' + fmt_exp(k['expires_at'])) if k else 'none'}",
     ], "manage this user below", mood="bold")
-    ban_btn = (B("✅ Unban",  cb=f"adm:uunban:{uid}", style=ct["good"])
+    ban_btn = (B("✅ Unban", cb=f"adm:uunban:{uid}", style=ct["good"])
                if u.get("banned")
-               else B("🚫 Ban",    cb=f"adm:uban:{uid}",   style=ct["bad"]))
+               else B("🚫 Ban", cb=f"adm:uban:{uid}", style=ct["bad"]))
     prem_btn = (B("🔓 Remove Premium", cb=f"adm:uunprem:{uid}", style=ct["bad"])
                 if u.get("is_premium")
-                else B("💎 Make Premium", cb=f"adm:uprem:{uid}",   style=ct["good"]))
+                else B("💎 Make Premium", cb=f"adm:uprem:{uid}", style=ct["good"]))
     return text, KB(
         [ban_btn, B("🗑 Revoke Key", cb=f"adm:urev:{uid}", style=ct["bad"])],
         [prem_btn],
@@ -1589,7 +1513,7 @@ def adm_user_card(uid):
          B("💰 +100c", cb=f"adm:ucred:{uid}:100", style=ct["good"])],
         [B("🔑 +7d Key",  cb=f"adm:ukey:{uid}:7",  style=ct["main"]),
          B("🔑 +30d Key", cb=f"adm:ukey:{uid}:30", style=ct["main"])],
-        [B("🔙 Back",     cb="adm:users",           style=ct["nav"])],
+        [B("🔙 Back", cb="adm:users", style=ct["nav"])],
     )
 
 def adm_keys():
@@ -1628,9 +1552,7 @@ def adm_gift():
         st   = "✅" if not g.get("expires_at") or g["expires_at"] > int(time.time()) else "⌛"
         prem = " [prem]" if g.get("is_premium") else ""
         lines.append(f"{st} <code>{g['code']}</code>{prem} · {g['credits']}c · {g.get('claimed_count',0)}/{g.get('max_users') or '∞'}")
-    text = card("🎟️ gift codes", [
-        *(lines if lines else ["no gift codes"]),
-    ], "create or manage gift codes")
+    text = card("🎟️ gift codes", [*(lines if lines else ["no gift codes"])], "create or manage gift codes")
     return text, KB(
         [B("➕ Create Gift", cb="adm:giftadd", style=ct["good"])],
         [B("🔙 Back",        cb="adm:home",    style=ct["nav"])],
@@ -1647,7 +1569,6 @@ def adm_refer_subs():
         "plans users can claim with referral points",
         *(lines if lines else ["no plans yet — using defaults"]),
         "format · <code>REF_COST DAYS LABEL</code>",
-        "example · <code>5 7 1 Week</code>",
     ], "manage plans below")
     rows = []
     for i, s in enumerate(subs):
@@ -1658,15 +1579,45 @@ def adm_refer_subs():
     rows.append([B("🔙 Back",    cb="adm:home",    style=ct["nav"])])
     return text, KB(*rows)
 
-def adm_import():
+def adm_welcome_media():
+    """Screen for managing welcome media."""
     ct = C()
-    text = card("💾 import database", [
-        "send a json file (exodus_export.json) to import",
-        "format · <code>{\"users\":[...]}</code>",
-        "only new users will be imported (existing ones skipped)",
-    ], "send your json file below", mood="calm")
-    admin_state[None] = {}
-    return text, KB([B("🔙 Back", cb="adm:home", style=ct["nav"])])
+    wm = get_welcome_media()
+    if wm and wm.get("type") and wm["type"] != "text":
+        status_lines = [
+            f"type · {wm['type']}",
+            f"file id · <code>{wm.get('file_id','')[:30]}…</code>",
+            f"caption · {E(wm.get('caption','(none)'))[:80]}",
+        ]
+        footer_txt = "update or clear below"
+    else:
+        status_lines = ["no welcome media set", "send a photo or video + caption to set it"]
+        footer_txt = "set welcome media below"
+    text = card("🖼 welcome media", [
+        "shown to users when they open the bot",
+        *status_lines,
+        "to set: send me a photo or video",
+        "you can add a caption with it",
+    ], footer_txt, mood="calm") + FOOTER
+    rows = []
+    if wm and wm.get("type") and wm["type"] != "text":
+        rows.append([B("🔍 Preview", cb="adm:wmpreview", style=ct["main"]),
+                     B("🗑 Clear",   cb="adm:wmclear",   style=ct["bad"])])
+    rows.append([B("📷 Set Photo/Video", cb="adm:wmset", style=ct["good"])])
+    rows.append([B("🔙 Back",            cb="adm:home",  style=ct["nav"])])
+    return text, KB(*rows)
+
+def adm_data():
+    ct = C()
+    text = card("💾 data management", [
+        "import · send json file or paste json text",
+        "export · get all data as json",
+    ], "manage data below", mood="calm") + FOOTER
+    return text, KB(
+        [B("📥 Import DB",  cb="adm:import", style=ct["main"]),
+         B("📤 Export DB",  cb="adm:export", style=ct["main"])],
+        [B("🔙 Back",       cb="adm:home",   style=ct["nav"])],
+    )
 
 def adm_prem():
     ct = C()
@@ -1680,9 +1631,7 @@ def adm_prem():
     else:
         users = [u for u in sq_all_users(5000) if u.get("is_premium")]
     lines = [f"💎 <code>{u['id']}</code> — {E(u.get('first_name') or '-')}" for u in users]
-    text = card("💎 premium users", [
-        *(lines if lines else ["none yet"]),
-    ], "these users have premium access")
+    text = card("💎 premium users", [*(lines if lines else ["none yet"])], "these users have premium access")
     return text, KB([B("🔙 Back", cb="adm:home", style=ct["nav"])])
 
 def adm_settings():
@@ -1694,7 +1643,6 @@ def adm_settings():
         f"credits per referral · <code>{CREDITS_PER_REFERRAL}</code>",
         f"button color · {COLOR_NAMES.get(cur_color, 'blue')}",
         f"contact · @{E(CONTACT_USERNAME)}",
-        f"base url · <code>{E(BASE_URL)}</code>",
     ], "configure bot settings")
     return text, KB(
         [B("🔒 Toggle Force-Join", cb="adm:settog", style=ct["main"]),
@@ -1702,7 +1650,9 @@ def adm_settings():
         [B("🔙 Back",              cb="adm:home",   style=ct["nav"])],
     )
 
-def _broadcast(admin_cid, text_msg):
+# ─── Broadcast ───────────────────────────────────────────────────
+def _broadcast_text(admin_cid, text_msg):
+    """Broadcast plain text to all users."""
     users = fb_users_all()
     ok = bad = 0
     for u in users:
@@ -1714,19 +1664,44 @@ def _broadcast(admin_cid, text_msg):
                 ok += 1
                 break
             except TGError as e:
-                if e.retry_after:
-                    time.sleep(e.retry_after + 1)
-                    continue
-                bad += 1
-                break
+                if e.retry_after: time.sleep(e.retry_after + 1); continue
+                bad += 1; break
         time.sleep(0.05)
     ct = C()
     send(admin_cid, card("📣 broadcast done", [
         f"✅ sent · <code>{ok}</code>",
         f"❌ failed · <code>{bad}</code>",
+    ], "text broadcast complete", mood="bold"),
+    KB([B("🔙 Admin Panel", cb="adm:home", style=ct["nav"])]))
+
+def _broadcast_media(admin_cid, media_type: str, file_id: str, caption: str):
+    """Broadcast photo/video to all users."""
+    users = fb_users_all()
+    ok = bad = 0
+    for u in users:
+        if u.get("banned"): continue
+        uid = u["id"]
+        try:
+            p = dict(chat_id=uid, caption=caption, parse_mode="HTML")
+            if media_type == "photo": p["photo"] = file_id; tg("sendPhoto", **p)
+            elif media_type == "video": p["video"] = file_id; tg("sendVideo", **p)
+            elif media_type == "animation": p["animation"] = file_id; tg("sendAnimation", **p)
+            ok += 1
+        except TGError as e:
+            if e.retry_after: time.sleep(e.retry_after + 1)
+            bad += 1
+        time.sleep(0.06)
+    ct = C()
+    send(admin_cid, card("📣 media broadcast done", [
+        f"✅ sent · <code>{ok}</code>",
+        f"❌ failed · <code>{bad}</code>",
+        f"type · {media_type}",
     ], "broadcast complete", mood="bold"),
     KB([B("🔙 Admin Panel", cb="adm:home", style=ct["nav"])]))
 
+# ═══════════════════════════════════════════════════════════════
+#  ADMIN CALLBACK ROUTER
+# ═══════════════════════════════════════════════════════════════
 def on_admin_callback(uid, cid, mid, data, ack):
     ct = C()
     parts = data.split(":")
@@ -1742,10 +1717,39 @@ def on_admin_callback(uid, cid, mid, data, ack):
     if act == "prem":    return show(cid, mid, *adm_prem())
     if act == "set":     return show(cid, mid, *adm_settings())
     if act == "rsubs":   return show(cid, mid, *adm_refer_subs())
+    if act == "wm":      return show(cid, mid, *adm_welcome_media())
+    if act == "data":    return show(cid, mid, *adm_data())
+
+    # Welcome media sub-actions
+    if act == "wmset":
+        admin_state[uid] = {"mode": "set_welcome_media"}
+        return show(cid, mid, card("🖼 set welcome media", [
+            "send a photo or video now",
+            "you can include a caption in the message",
+            "or send caption separately after uploading",
+            "type /skip to set media without caption",
+        ], "send photo or video below", mood="calm") + FOOTER,
+        KB([B("❌ Cancel", cb="adm:wm", style=ct["bad"])]))
+
+    if act == "wmclear":
+        clear_welcome_media()
+        ack("Welcome media cleared")
+        return show(cid, mid, *adm_welcome_media())
+
+    if act == "wmpreview":
+        wm = get_welcome_media()
+        if wm and wm.get("file_id"):
+            sent = send_welcome_media(cid)
+            if not sent: send(cid, "No welcome media set.")
+        return ack("Preview sent")
 
     if act == "import":
         admin_state[uid] = {"mode": "import_db"}
-        return show(cid, mid, *adm_import())
+        return show(cid, mid, card("💾 import database", [
+            "send a json file or paste json text",
+            "format · <code>{\"users\":[...]}</code>",
+        ], "send json below", mood="calm") + FOOTER,
+        KB([B("❌ Cancel", cb="adm:home", style=ct["bad"])]))
 
     if act == "export":
         if _db:
@@ -1755,11 +1759,9 @@ def on_admin_callback(uid, cid, mid, data, ack):
                 gifts = [d.to_dict() for d in _db.collection("gift_codes").stream()]
                 chans = [d.to_dict() for d in _db.collection("channels").stream()]
             except:
-                users = sq_all_users(5000)
-                keys = []; gifts = []; chans = sq_all_channels()
+                users = sq_all_users(5000); keys=[]; gifts=[]; chans=sq_all_channels()
         else:
-            users = sq_all_users(5000)
-            keys = []; gifts = []; chans = sq_all_channels()
+            users = sq_all_users(5000); keys=[]; gifts=[]; chans=sq_all_channels()
         payload = json.dumps({"users": users, "keys": keys, "gifts": gifts, "channels": chans}, default=str)
         _send_document(cid, "exodus_export.json", payload.encode())
         return show(cid, mid,
@@ -1771,7 +1773,6 @@ def on_admin_callback(uid, cid, mid, data, ack):
         return show(cid, mid, card("➕ add channel", [
             "send the channel @username or -100… id",
             "private channel · send <code>-100ID https://t.me/+invite</code>",
-            "bot must already be an admin in that channel",
         ], "type channel info below", mood="calm"),
         KB([B("❌ Cancel", cb="adm:ch", style=ct["bad"])]))
 
@@ -1780,22 +1781,49 @@ def on_admin_callback(uid, cid, mid, data, ack):
         ack("Channel removed")
         return show(cid, mid, *adm_channels())
 
+    # Broadcast
     if act == "bc":
-        admin_state[uid] = {"mode": "broadcast"}
+        admin_state[uid] = {"mode": "broadcast_choose"}
         return show(cid, mid, card("📣 broadcast", [
+            "choose broadcast type",
+            "text · send a text message to all users",
+            "media · send a photo or video to all users",
+        ], "choose below", mood="calm") + FOOTER,
+        KB([B("📝 Text Only",   cb="adm:bc_text",  style=ct["main"]),
+            B("📷 Photo/Video", cb="adm:bc_media", style=ct["good"])],
+           [B("❌ Cancel", cb="adm:home", style=ct["bad"])]))
+
+    if act == "bc_text":
+        admin_state[uid] = {"mode": "broadcast_text"}
+        return show(cid, mid, card("📝 text broadcast", [
             "send the message to broadcast to all users",
-            "html supported · <code>&lt;b&gt;</code>  <code>&lt;i&gt;</code>  <code>&lt;a href&gt;</code>",
-        ], "type your message below", mood="calm"),
+            "html supported · <b>bold</b>  <i>italic</i>  <code>code</code>",
+        ], "type your message below", mood="calm") + FOOTER,
+        KB([B("❌ Cancel", cb="adm:home", style=ct["bad"])]))
+
+    if act == "bc_media":
+        admin_state[uid] = {"mode": "broadcast_media"}
+        return show(cid, mid, card("📷 media broadcast", [
+            "send a photo or video to broadcast",
+            "you can include a caption in the message",
+            "caption supports html formatting",
+        ], "send photo or video below", mood="calm") + FOOTER,
         KB([B("❌ Cancel", cb="adm:home", style=ct["bad"])]))
 
     if act == "bcgo":
         txt = (prev or {}).get("text")
         if not txt: return ack("Nothing to send", True)
-        ack("Broadcast started")
-        threading.Thread(target=_broadcast, args=(cid, txt), daemon=True).start()
-        return show(cid, mid, card("📣 broadcasting…", [
-            "you will get a report when done",
-        ], "sit tight", mood="calm"))
+        ack("Text broadcast started")
+        threading.Thread(target=_broadcast_text, args=(cid, txt), daemon=True).start()
+        return show(cid, mid, card("📣 broadcasting…", ["you will get a report when done"], "sit tight", mood="calm"))
+
+    if act == "bcmediago":
+        p = prev or {}
+        media_type = p.get("media_type"); file_id = p.get("file_id"); caption = p.get("caption","")
+        if not file_id: return ack("No media to broadcast", True)
+        ack("Media broadcast started")
+        threading.Thread(target=_broadcast_media, args=(cid, media_type, file_id, caption), daemon=True).start()
+        return show(cid, mid, card("📣 media broadcasting…", ["you will get a report when done"], "sit tight", mood="calm"))
 
     if act == "ufind":
         admin_state[uid] = {"mode": "find_user"}
@@ -1850,10 +1878,7 @@ def on_admin_callback(uid, cid, mid, data, ack):
     if act == "kgen":
         admin_state[uid] = {"mode": "gen_key"}
         return show(cid, mid,
-                    card("➕ generate key", [
-                        "send · <code>USER_ID DAYS</code>",
-                        "example · <code>123456 30</code>",
-                    ], "type below", mood="calm"),
+                    card("➕ generate key", ["send · <code>USER_ID DAYS</code>", "example · <code>123456 30</code>"], "type below", mood="calm"),
                     KB([B("❌ Cancel", cb="adm:keys", style=ct["bad"])]))
 
     if act == "krev":
@@ -1897,11 +1922,56 @@ def on_admin_callback(uid, cid, mid, data, ack):
 
     return ack()
 
-def on_admin_input(uid, cid, text_in):
+def on_admin_input(uid, cid, text_in, msg=None):
+    """Handle text/media input from admin while in a state."""
     ct = C()
     st   = admin_state.get(uid) or {}
     mode = st.get("mode")
     back = lambda cb: KB([B("🔙 Back", cb=cb, style=ct["nav"])])
+
+    # ── Handle photo/video input (for welcome media or media broadcast) ──
+    if msg and mode in ("set_welcome_media", "broadcast_media"):
+        photo = msg.get("photo")
+        video = msg.get("video")
+        animation = msg.get("animation")
+        caption = msg.get("caption") or ""
+
+        if photo:
+            file_id = photo[-1]["file_id"]  # largest size
+            media_type = "photo"
+        elif video:
+            file_id = video["file_id"]
+            media_type = "video"
+        elif animation:
+            file_id = animation["file_id"]
+            media_type = "animation"
+        else:
+            return send(cid, card("❌ unsupported", ["send a photo or video"], "try again", mood="calm"))
+
+        if mode == "set_welcome_media":
+            set_welcome_media(media_type, file_id, caption)
+            admin_state.pop(uid, None)
+            send(cid, card("✅ welcome media set!", [
+                f"type · {media_type}",
+                f"caption · {E(caption[:60]) if caption else '(none)'}",
+                "users will see this when they open the bot",
+            ], "done", mood="bold") + FOOTER,
+            back("adm:wm"))
+
+        elif mode == "broadcast_media":
+            # Store media info, ask to confirm
+            admin_state[uid] = {"mode": "confirm_media_broadcast",
+                                 "media_type": media_type, "file_id": file_id, "caption": caption}
+            send(cid, card("📣 confirm media broadcast", [
+                f"type · {media_type}",
+                f"caption · {E(caption[:80]) if caption else '(none)'}",
+                "send this to ALL users?",
+            ], "confirm below", mood="calm") + FOOTER,
+            KB([B("✅ Send Now", cb="adm:bcmediago", style=ct["good"]),
+                B("❌ Cancel",  cb="adm:home",       style=ct["bad"])]))
+        return
+
+    if not text_in: return
 
     try:
         if mode == "add_channel":
@@ -1912,14 +1982,10 @@ def on_admin_input(uid, cid, text_in):
             m = re.match(r"https?://t\.me/([A-Za-z0-9_]{4,})/?$", ref)
             if m: ref = "@" + m.group(1)
             chat_ref = int(ref) if re.fullmatch(r"-?\d+", ref) else ref
-            try:
-                chat = tg("getChat", chat_id=chat_ref)
-            except TGError as e:
-                raise ValueError(f"Cannot access channel: {e.desc}")
-            try:
-                me = tg("getChatMember", chat_id=chat["id"], user_id=BOT_ID)
-            except TGError as e:
-                raise ValueError(f"Bot not in channel: {e.desc}")
+            try: chat = tg("getChat", chat_id=chat_ref)
+            except TGError as e: raise ValueError(f"Cannot access channel: {e.desc}")
+            try: me = tg("getChatMember", chat_id=chat["id"], user_id=BOT_ID)
+            except TGError as e: raise ValueError(f"Bot not in channel: {e.desc}")
             if me.get("status") not in ("administrator", "creator"):
                 raise ValueError("make the bot an admin in the channel first")
             if chat.get("username"): link = f"https://t.me/{chat['username']}"
@@ -1932,17 +1998,18 @@ def on_admin_input(uid, cid, text_in):
             admin_state.pop(uid, None)
             send(cid, card("✅ channel added", [f"{E(title)}"], "done", mood="calm"), back("adm:ch"))
 
-        elif mode == "broadcast":
-            try: send(cid, "👀 preview\n\n" + text_in + FOOTER)
+        elif mode == "broadcast_text":
+            # Preview then confirm
+            try: send(cid, "👀 preview:\n\n" + text_in + FOOTER)
             except TGError as e:
                 return send(cid, card("❌ invalid html", [E(e.desc)], "fix and try again", mood="calm"))
-            st["text"] = text_in
-            send(cid, card("📣 confirm broadcast", [
-                "send this to all users?",
-            ], "confirm below", mood="calm"),
+            admin_state[uid] = {"mode": "confirm_text_broadcast", "text": text_in}
+            send(cid, card("📣 confirm broadcast", ["send this text to all users?"], "confirm below", mood="calm") + FOOTER,
             KB([B("✅ Send Now", cb="adm:bcgo", style=ct["good"]),
                 B("❌ Cancel",  cb="adm:home", style=ct["bad"])]))
-            st["mode"] = "confirm"
+
+        elif mode == "confirm_text_broadcast":
+            pass  # handled via callback
 
         elif mode == "find_user":
             if not text_in.strip().lstrip("-").isdigit():
@@ -1984,9 +2051,7 @@ def on_admin_input(uid, cid, text_in):
         elif mode == "create_gift":
             p = text_in.split()
             if len(p) < 3 or not (p[0].isdigit() and p[1].isdigit() and p[2].isdigit()):
-                return send(cid, card("❌ format error", [
-                    "send: CREDITS MAX_USERS DAYS_VALID [PREMIUM]",
-                ], "try again", mood="calm"))
+                return send(cid, card("❌ format error", ["send: CREDITS MAX_USERS DAYS_VALID [PREMIUM]"], "try again", mood="calm"))
             credits, max_users, days = int(p[0]), int(p[1]), int(p[2])
             is_premium = len(p) > 3 and p[3].lower() == "premium"
             if credits <= 0: return send(cid, card("❌ credits must be > 0", [], "", mood="calm"))
@@ -2017,16 +2082,13 @@ def on_admin_input(uid, cid, text_in):
             p = text_in.split(None, 2)
             if len(p) < 2 or not (p[0].isdigit() and p[1].isdigit()):
                 return send(cid, card("❌ format error", ["send: REF_COST DAYS LABEL"], "try again", mood="calm"))
-            ref_cost = int(p[0])
-            days     = int(p[1])
-            label    = p[2] if len(p) > 2 else f"{days}d"
+            ref_cost = int(p[0]); days = int(p[1])
+            label = p[2] if len(p) > 2 else f"{days}d"
             if ref_cost < 1 or days < 1:
                 return send(cid, card("❌ cost and days must be ≥ 1", [], "", mood="calm"))
             sq_add_refer_sub(ref_cost, days, label)
             admin_state.pop(uid, None)
-            send(cid, card("✅ plan added", [
-                f"{ref_cost} refs → {label} ({days}d)",
-            ], "done", mood="calm"), back("adm:rsubs"))
+            send(cid, card("✅ plan added", [f"{ref_cost} refs → {label} ({days}d)"], "done", mood="calm"), back("adm:rsubs"))
 
         elif mode == "import_db":
             try:
@@ -2043,25 +2105,19 @@ def on_admin_input(uid, cid, text_in):
                 send(cid, card("❌ invalid json", ["send the full export json"], "try again", mood="calm"))
 
     except ValueError as e:
-        cb_map = {
-            "add_channel": "adm:ch",
-            "broadcast":   "adm:home",
-            "find_user":   "adm:users",
-        }
+        cb_map = {"add_channel": "adm:ch", "broadcast_text": "adm:home", "find_user": "adm:users"}
         send(cid, card("❌ error", [E(str(e))], "try again", mood="calm"),
              KB([B("🔙 Cancel", cb=cb_map.get(mode, "adm:home"), style=ct["bad"])]))
 
 def _send_document(cid, filename, data_bytes):
     try:
-        import io
         tg("sendDocument", _t=60,
            chat_id=cid,
            document=("document", (filename, io.BytesIO(data_bytes), "application/json")))
     except Exception as e:
         print(f"[Bot] sendDocument error: {e}", flush=True)
         if len(data_bytes) < 4000:
-            try:
-                send(cid, f"<pre>{html.escape(data_bytes.decode()[:3900])}</pre>")
+            try: send(cid, f"<pre>{html.escape(data_bytes.decode()[:3900])}</pre>")
             except: pass
 
 # ═══════════════════════════════════════════════════════════════
@@ -2073,18 +2129,30 @@ def on_message(m):
     frm, cid = m["from"], chat["id"]
     uid = frm["id"]
     text = (m.get("text") or "").strip()
-    if not text: return
+
+    # Detect media in message (for admin states)
+    has_photo = bool(m.get("photo"))
+    has_video = bool(m.get("video"))
+    has_animation = bool(m.get("animation"))
+    is_media = has_photo or has_video or has_animation
+
+    if not text and not is_media: return
 
     ref = None
     if text.startswith("/start"):
         p = text.split(maxsplit=1)
         if len(p) > 1 and p[1].startswith("ref_") and p[1][4:].isdigit():
             ref = int(p[1][4:])
-    row, _new = upsert_user(frm, ref)
+
+    row, is_new = upsert_user(frm, ref)
     if row and row.get("banned") and uid not in ADMIN_IDS:
         return send(cid, card("🚫 banned", [
             "you are banned from using this bot",
         ], "contact dev to appeal", mood="calm") + FOOTER)
+
+    # Admin media input (photo/video for welcome media or broadcast)
+    if uid in ADMIN_IDS and uid in admin_state and is_media:
+        return on_admin_input(uid, cid, text, msg=m)
 
     if text.startswith("/"):
         cmd = text.split()[0].split("@")[0].lower()
@@ -2100,21 +2168,25 @@ def on_message(m):
             set_button_color(nxt)
             return send(cid, card("🎨 color changed", [
                 f"{COLOR_NAMES.get(cur)} → {COLOR_NAMES.get(nxt)}",
-                f"all buttons will now appear in {nxt}",
             ], "done") + FOOTER)
 
         if cmd == "/admin" and uid in ADMIN_IDS:
             admin_state.pop(uid, None)
             return send(cid, *adm_home())
 
-        if cmd == "/buy":
-            return send(cid, *screen_buy())
+        if cmd == "/buy": return send(cid, *screen_buy())
 
         if not gate(uid, cid): return
 
         if cmd in ("/start", "/menu", "/help"):
             try_count_referral(uid)
+            # Send welcome media first (if set), then main menu
+            wm = get_welcome_media()
+            if wm and wm.get("file_id"):
+                try: send_welcome_media(cid)
+                except: pass
             return send(cid, *screen_start(uid, frm.get("first_name")))
+
         if cmd == "/refer":   return send(cid, *screen_refer(uid))
         if cmd in ("/key", "/mykey"): return send(cid, *screen_key(uid))
         if cmd in ("/api", "/docs"):  return send(cid, *screen_docs(uid))
@@ -2123,9 +2195,9 @@ def on_message(m):
 
         return send(cid, *screen_start(uid, frm.get("first_name")))
 
-    # Admin input (text state machine)
+    # Admin text input (state machine)
     if uid in ADMIN_IDS and uid in admin_state:
-        return on_admin_input(uid, cid, text)
+        return on_admin_input(uid, cid, text, msg=m)
 
     # Bomb number input
     pend = _pending_action.get(uid)
@@ -2167,13 +2239,11 @@ def on_callback(cq):
     if row and row.get("banned") and uid not in ADMIN_IDS:
         return ack("🚫 Banned.", True)
 
-    # Admin callbacks
     if data.startswith("adm:"):
         if uid not in ADMIN_IDS: return ack("Admins only", True)
         on_admin_callback(uid, cid, mid, data, ack)
         return ack()
 
-    # Force-join verify
     if data == "verify":
         _member_cache.clear()
         miss = missing_channels(uid)
@@ -2190,7 +2260,6 @@ def on_callback(cq):
     if data == "noop": return ack()
     if not gate(uid, cid, mid): return ack()
 
-    # Navigation
     if data == "back:start":
         return show(cid, mid, *screen_start(uid, cq["from"].get("first_name")))
     if data == "credits":  return show(cid, mid, *screen_credits(uid))
@@ -2207,30 +2276,26 @@ def on_callback(cq):
             "nuclear bomb requires premium",
             f"contact @{E(CONTACT_USERNAME)} to upgrade",
         ], "get premium below", mood="calm") + FOOTER,
-        KB([B("💎 Get Premium", url=CONTACT_URL,  style=ct["bad"])],
-           [B("🔙 Back",        cb="back:start",  style=ct["nav"])]))
+        KB([B("💎 Get Premium", url=CONTACT_URL, style=ct["bad"])],
+           [B("🔙 Back",        cb="back:start", style=ct["nav"])]))
 
-    # Country selection
     if data.startswith("country:"):
         country = data.split(":")[1]
         if country == "ind": return show(cid, mid, *screen_india(uid))
         if country == "bd":  return show(cid, mid, *screen_bd(uid))
         if country == "pak": return show(cid, mid, *screen_pak(uid))
 
-    # Bomb mode: bomb:<country>:<mode>
     if data.startswith("bomb:"):
         parts = data.split(":")
         if len(parts) >= 3:
             return start_bomb_flow(uid, cid, mid, parts[1], parts[2])
 
-    # Refer claim
     if data.startswith("claim:"):
         try:
             idx   = int(data.split(":")[1])
             plans = get_refer_subs()
             res   = claim_plan(uid, idx, plans)
-        except (ValueError, IndexError):
-            return ack()
+        except (ValueError, IndexError): return ack()
         if not res:
             ack("Not enough referral points", True)
             return show(cid, mid, *screen_refer(uid))
@@ -2243,8 +2308,8 @@ def on_callback(cq):
     ack()
 
 
-def _safe(fn, obj):
-    try: fn(obj)
+def _safe(fn, *args):
+    try: fn(*args)
     except Exception as e:
         print(f"[Bot] handler error: {type(e).__name__}: {e}", flush=True)
 
@@ -2283,9 +2348,7 @@ def start_bot(port):
     BASE_URL   = os.environ.get("BASE_URL", f"http://localhost:{LOCAL_PORT}").strip().rstrip("/")
     ADMIN_IDS  = {int(x) for x in re.findall(r"-?\d+", os.environ.get("ADMIN_IDS", ""))}
     BOT_TOKEN  = os.environ.get("BOT_TOKEN", "").strip()
-
-    # Rebuild FOOTER with final DEV_URL
-    FOOTER = f"\n<i>» <a href=\"{DEV_URL}\">{DEV_TAG}</a></i>"
+    FOOTER     = f"\n<i>» <a href=\"{DEV_URL}\">{DEV_TAG}</a></i>"
 
     if not BOT_TOKEN:
         print("⚠️  BOT_TOKEN not set — Telegram bot disabled.", flush=True)
@@ -2306,8 +2369,9 @@ def start_bot(port):
         print("⚠️  ADMIN_IDS empty — nobody can open the admin panel.", flush=True)
 
     perm_list = "\n".join(f"    {i+1}. {c['title']} ({c['chat_id']})" for i, c in enumerate(PERM_CHANNELS))
+    wm = get_welcome_media()
     print(f"""
-[Bot] ✅ Started
+[Bot] ✅ Started v3.0
   Username:    @{BOT_USERNAME}
   Admins:      {ADMIN_IDS or 'NONE SET'}
   Color:       {get_button_color()}
@@ -2315,6 +2379,7 @@ def start_bot(port):
   Firebase:    {'✅' if _db else '❌'}
   Base URL:    {BASE_URL}
   Perm chans:  {len(PERM_CHANNELS)} loaded
+  Welcome media: {wm.get('type','none') if wm else 'none'}
 {perm_list if PERM_CHANNELS else '    (none — set PERMANENT_CHANNELS in env)'}
 """, flush=True)
 
