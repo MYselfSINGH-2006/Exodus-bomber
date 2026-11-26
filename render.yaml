@@ -1,0 +1,91 @@
+services:
+  - type: web
+    name: exodus-sms-bomber
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python Main.py
+    # render sets PORT automatically — app reads it
+    # render sets BASE_URL from the env vars below
+    envVars:
+      # ─── REQUIRED — set these in render dashboard ────────────
+      - key: BOT_TOKEN
+        sync: false          # never committed to git
+
+      - key: ADMIN_IDS
+        sync: false          # your numeric Telegram ID
+
+      - key: BASE_URL
+        sync: false          # set to your render URL e.g. https://exodus-sms-bomber.onrender.com
+
+      # ─── IDENTITY ─────────────────────────────────────────────
+      - key: ADMIN_PASSWORD
+        value: Exodus_OWN3R
+
+      - key: DEVELOPER_TAG
+        value: "@exodus_own3r"
+
+      - key: DEVELOPER_URL
+        value: "https://t.me/exodus_own3r"
+
+      - key: CONTACT_USERNAME
+        value: exodus_own3r
+
+      # ─── PERMANENT FORCE-JOIN CHANNELS ───────────────────────
+      # Always enforced before any bot usage
+      - key: PERMANENT_CHANNELS
+        value: "@main_exodus,@DARKNYTEEXODUS_backup,-1003892030550,@crackedexodusbackup,-1003804594372"
+
+      - key: PERMANENT_CHANNEL_LINKS
+        value: "https://t.me/main_exodus,https://t.me/DARKNYTEEXODUS_backup,https://t.me/+4IC44qjFV2o5OTY1,https://t.me/crackedexodusbackup,https://t.me/+gMyQOx7tDZE1MTc1"
+
+      - key: PERMANENT_CHANNEL_TITLES
+        value: "Main Exodus Hacking,Darknyte Exodus Backup,Leak & Database,Cracked Exodus Backup,Main Tools"
+
+      # ─── PROXY ────────────────────────────────────────────────
+      # Paste your proxies here as one line, comma or newline separated
+      # Format: ip:port:user:pass,ip:port:user:pass,...
+      - key: PROXY_LIST
+        sync: false
+
+      - key: USE_PROXY
+        value: "true"
+
+      - key: PROXY_MULTIPLIER
+        value: "10"
+
+      # ─── API ──────────────────────────────────────────────────
+      - key: REQUIRE_API_KEY
+        value: "true"
+
+      - key: API_DAILY_LIMIT
+        value: "500"
+
+      # ─── CREDITS ──────────────────────────────────────────────
+      - key: CREDITS_PER_REFERRAL
+        value: "10"
+
+      - key: CREDITS_SMS_BOMB
+        value: "2"
+
+      - key: CREDITS_CALL_BOMB
+        value: "5"
+
+      - key: CREDITS_CUSTOM_BOMB
+        value: "3"
+
+      - key: CREDITS_MIXED_BOMB_BD
+        value: "7"
+
+      - key: CREDITS_NUCLEAR_IND
+        value: "5"
+
+      - key: CREDITS_NUCLEAR_BD
+        value: "30"
+
+      # ─── DATABASE ─────────────────────────────────────────────
+      - key: SQLITE_PATH
+        value: "exodus_bot.db"
+
+      # Optional Firebase — paste entire service account JSON as one line
+      # - key: FIREBASE_KEY_JSON
+      #   value: '{"type":"service_account","project_id":"..."}'
